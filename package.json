@@ -1,0 +1,9 @@
+{
+  "name": "notion-llm-wiki",
+  "version": "0.1.0",
+  "description": "Karpathy's LLM Wiki adapted for Notion",
+  "type": "module",
+  "dependencies": {
+    "@notionhq/client": "^5.22.0"
+  }
+}
