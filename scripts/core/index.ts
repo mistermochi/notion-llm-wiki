@@ -106,9 +106,10 @@ export const WIKI_IDS: WikiIds = {
 // ═════════════════════════════════════════════════════════════════════════
 
 export function createClient(): Client {
-  const key = process.env.NOTION_KEY;
-  if (!key) throw new Error("NOTION_KEY not set");
-  return new Client({ auth: key, notionVersion: "2026-03-11" });
+  const raw = process.env.NOTION_KEY || process.env.NOTION_TOKEN;
+  if (!raw) throw new Error("NOTION_KEY not set");
+  const key = raw.trim();
+  return new Client({ auth: key, notionVersion: "2022-06-28" });
 }
 
 // ═════════════════════════════════════════════════════════════════════════
