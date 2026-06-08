@@ -47,18 +47,33 @@ function lintEntry(e: LintEntry, issues: string[], warns: string[], nameMap: Map
   existing.push(e.id); nameMap.set(e.name, existing);
 }
 
+function hasFileAttached(raw: NotionPage): boolean {
+  const prop = raw.properties?.["File"];
+  if (!prop || prop.type !== "files") return false;
+  const files = (prop as any).files;
+  if (!files || !Array.isArray(files) || files.length === 0) return false;
+  return files.some((f: any) => {
+    if (f.type === "file") return f.file?.url?.length > 0;
+    if (f.type === "external") return f.external?.url?.length > 0;
+    return true;
+  });
+}
+
 async function lintRawSources(notion: ReturnType<typeof createClient>, warns: string[], issues: string[]) {
   try {
     const raws = await queryAll(notion, RAW_DB);
-    let orphaned = 0;
+    let orphaned = 0, missingFile = 0;
     for (const r of raws) {
       const name = pv(getPropVal(r, "Name")) || "(unnamed)";
       const wikiEntries = getPropVal(r, "WikiEntries");
       if (wikiEntries === null || wikiEntries === 0 || wikiEntries === "?") {
         orphaned++; issues.push(`[ORPHAN] 0 entries: ${name} (${r.id.slice(0, 12)})`);
       }
+      if (!hasFileAttached(r)) {
+        missingFile++; issues.push(`[FILE] No file attached: ${name} (${r.id.slice(0, 12)})`);
+      }
     }
-    console.log(`  Raw sources: ${raws.length} (${orphaned} orphaned)`);
+    console.log(`  Raw sources: ${raws.length} (${orphaned} orphaned, ${missingFile} missing file)`);
   } catch (ex) { console.log(`  Raw sources SKIP: ${ex}`); }
 }
 
