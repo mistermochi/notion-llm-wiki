@@ -96,6 +96,36 @@ Manual: cross-ref audit, tag audit, source drift, page size >200b, log rotation.
 - Log before and after
 - Run lint after
 
+## Raw Source Workflow (v3) — Agent-Driven Document Ingest
+
+An alternative to the entry-based ingest engine. Instead of writing curated
+wiki entries by hand, this pipeline ingests an uploaded document as a complete
+raw source page with full text, CDN-hosted file, and searchable metadata.
+
+**When to use:** A user uploads a PDF/document and wants the full text stored
+as a searchable raw source page, optionally with curated wiki entries derived
+later.
+
+### 5-step pipeline
+
+```
+Upload ──→ Discuss ──→ Extract ──→ Write Body ──→ Update Metadata
+```
+
+1. **Upload attachment** to a blank Raw Source DB entry using Notion's File
+   Upload API (3-step: `fileUploads.create` → `fileUploads.send` → attach to
+   page File property). File lands on Notion's permanent S3 CDN.
+2. **Discuss with user** — SourceRef, SourceType, format preferences.
+3. **Extract contents** — PyMuPDF for PDFs, Bun.file.text() for plain text,
+   python-docx for .docx, etc.
+4. **Write full content into body** — heading-detection heuristic converts
+   text to Notion heading_2/heading_3/paragraph blocks, chunked into batches
+   of 100.
+5. **Update metadata** — Name, SourceRef, SourceType, Ingested, Content
+   (rich_text for vector search).
+
+Full reference: `references/raw-source-workflow.md`.
+
 ## Wholedoc Mode (v2)
 
 Large guideline PDFs should NOT be split into separate wiki entries manually.
@@ -143,8 +173,10 @@ Options: `--target-name` `--dry-run` `--parent-id` `--db`
 | `scripts/ingest-engine.ts` | Orient→Archive→Consolidate→Log pipeline | `bun run scripts/ingest-engine.ts` |
 | `scripts/vault-lint.ts` | Property completeness + staleness checks | `bun run scripts/vault-lint.ts` |
 | `scripts/merge/merge-pages.ts` | Duplicate page merge & consolidation (ad-hoc) | `bun run scripts/merge/merge-pages.ts --source-ref ...` |
+| `scripts/upload-pdf-notion.ts` | Upload file to Notion CDN via 3-step File Upload API | `NOTION_KEY=... bun run scripts/upload-pdf-notion.ts` |
 
 **Reference docs** in `references/` folder — use `readReference` to load on demand.
+
 
 ## Pitfalls
 - Integration must be shared with **both** databases (404 = missing share)

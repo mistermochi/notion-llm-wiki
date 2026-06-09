@@ -75,3 +75,4 @@ Shared types, client factory, Notion API operations, block builders, block↔mar
 | `scripts/ingest-engine.ts` | Orient → Archive → Consolidate → Log (supports entries + wholedoc) |
 | `scripts/vault-lint.ts` | Property completeness + staleness checks |
 | `scripts/merge/merge-pages.ts` | Ad-hoc duplicate page merge by SourceRef |
+| `scripts/upload-pdf-notion.ts` | Upload file to Notion CDN via 3-step File Upload API |
