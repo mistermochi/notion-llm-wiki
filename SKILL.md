@@ -96,6 +96,41 @@ Manual: cross-ref audit, tag audit, source drift, page size >200b, log rotation.
 - Log before and after
 - Run lint after
 
+## Wholedoc Mode (v2)
+
+Large guideline PDFs should NOT be split into separate wiki entries manually.
+Use `wholedoc` mode for documents likely to exceed 200 lines.
+
+### How it works
+
+1. Set `MODE = "wholedoc"` at the top of `scripts/ingest-engine.ts`
+2. Edit the `WHOLE_DOC` config with your source name and SourceRef
+3. If the document was already uploaded to Notion (e.g. as duplicate pages),
+   set `EXISTING_PAGE_IDS` to merge them automatically
+4. The engine will: find duplicates by SourceRef → merge child-page blocks
+   (deduping duplicates) → archive raw source → create one wiki entry
+
+### Standalone merge: `scripts/merge/merge-pages.ts`
+
+For ad-hoc merging of already-uploaded duplicates:
+
+```shellscript
+NOTION_KEY=ntn_... bun run scripts/merge/merge-pages.ts --source-ref "CCIDER-EH-001(V3.1)"
+NOTION_KEY=ntn_... bun run scripts/merge/merge-pages.ts --source-ref "CCIDER-EH-001(V3.1)" --dry-run
+```
+
+Options: `--target-name` `--dry-run` `--parent-id` `--db`
+
+### Key functions added to core
+
+| Function | Purpose |
+|---|---|
+| `readAllBlocks(notion, pageId)` | Paginated reads ALL blocks from a page |
+| `findPagesBySourceRef(notion, dbId, sourceRef)` | Find duplicates by SourceRef property |
+| `dedupChildPages(blocks)` | Dedup child_page blocks by title, keep first |
+| `mergePages(notion, pageIds, title, parentId)` | Full merge: read → dedup → create → trash |
+| `parseDocumentToBlocks(text)` | Plain text → Notion blocks (handles 2000-char limit) |
+
 ## Scripts Index
 
 | File | Purpose | Usage |
@@ -107,6 +142,7 @@ Manual: cross-ref audit, tag audit, source drift, page size >200b, log rotation.
 | `scripts/export/exportWiki.ts` | Full workspace export to MD | `import { fullExport } from "./export/exportWiki"` |
 | `scripts/ingest-engine.ts` | Orient→Archive→Consolidate→Log pipeline | `bun run scripts/ingest-engine.ts` |
 | `scripts/vault-lint.ts` | Property completeness + staleness checks | `bun run scripts/vault-lint.ts` |
+| `scripts/merge/merge-pages.ts` | Duplicate page merge & consolidation (ad-hoc) | `bun run scripts/merge/merge-pages.ts --source-ref ...` |
 
 **Reference docs** in `references/` folder — use `readReference` to load on demand.
 

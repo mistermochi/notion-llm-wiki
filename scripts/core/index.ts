@@ -1,5 +1,7 @@
 // ── Notion LLM Wiki — Core Module ───────────────────────────────────────
 // Consolidated: types + client + API ops + block mapping + rich-text.
+// v2 — added wholedoc merge pipeline: readAllBlocks, findPagesBySourceRef,
+// dedupChildPages, mergePages, parseDocumentToBlocks
 
 import { Client, collectPaginatedAPI } from "@notionhq/client";
 
@@ -55,6 +57,17 @@ export type RawSource = {
   file_path: string;
 };
 
+/** Whole-document ingest config — ingests a large document as a single wiki entry */
+export type WholeDocConfig = {
+  mode: "wholedoc";
+  name: string;
+  source_ref: string;
+  source_type: string;
+  file_path?: string;
+  /** Optional: split into multiple wiki entries at heading level 2 (if true) */
+  split_by_heading_2?: boolean;
+};
+
 export type LintEntry = {
   id: string;
   name: string;
@@ -108,8 +121,7 @@ export const WIKI_IDS: WikiIds = {
 export function createClient(): Client {
   const raw = process.env.NOTION_KEY || process.env.NOTION_TOKEN;
   if (!raw) throw new Error("NOTION_KEY not set");
-  const key = raw.trim();
-  return new Client({ auth: key, notionVersion: "2022-06-28" });
+  return new Client({ auth: raw.trim(), notionVersion: "2022-06-28" });
 }
 
 // ═════════════════════════════════════════════════════════════════════════
@@ -121,7 +133,9 @@ export interface NotionPage {
   properties: Record<string, PropVal>;
 }
 
-interface RawNotionBlock {
+export interface RawNotionBlock {
+  object: string;
+  id: string;
   type: string;
   [key: string]: unknown;
 }
@@ -182,7 +196,249 @@ export async function addBlocks(
   pageId: string,
   blocks: WikiBlock[],
 ): Promise<void> {
-  await notion.blocks.children.append({ block_id: pageId, children: blocks as any });
+  // Append in batches of 100 to stay within API limits
+  for (let i = 0; i < blocks.length; i += 100) {
+    const batch = blocks.slice(i, i + 100);
+    await notion.blocks.children.append({ block_id: pageId, children: batch as any });
+  }
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+// Wholedoc: Paginated Block Reading
+// ═════════════════════════════════════════════════════════════════════════
+
+/** Read ALL blocks from a page, following pagination. Yields up to `max` blocks. */
+export async function readAllBlocks(
+  notion: Client,
+  pageId: string,
+  max = 10_000,
+): Promise<RawNotionBlock[]> {
+  const all: RawNotionBlock[] = [];
+  let cursor: string | null | undefined;
+  while (all.length < max) {
+    const resp: any = await notion.blocks.children.list({
+      block_id: pageId,
+      page_size: 100,
+      ...(cursor ? { start_cursor: cursor } : {}),
+    });
+    for (const b of resp.results) {
+      if (!(b as any).archived && !(b as any).in_trash) {
+        all.push(b as RawNotionBlock);
+      }
+    }
+    if (!resp.has_more) break;
+    cursor = resp.next_cursor;
+  }
+  return all;
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+// Wholedoc: Duplicate Detection & Page Merge
+// ═════════════════════════════════════════════════════════════════════════
+
+/**
+ * Find all pages in a database that have a matching SourceRef.
+ * Useful for detecting duplicate ingests of the same document.
+ */
+export async function findPagesBySourceRef(
+  notion: Client,
+  dbId: string,
+  sourceRef: string,
+): Promise<NotionPage[]> {
+  return queryAll(notion, dbId, {
+    property: "SourceRef",
+    rich_text: { equals: sourceRef },
+  });
+}
+
+/** Dedup child_page blocks by title. Keeps the first occurrence of each unique title. */
+export function dedupChildPages(
+  blocks: RawNotionBlock[],
+): { unique: RawNotionBlock[]; duplicates: RawNotionBlock[]; deduped: string[] } {
+  const seen = new Map<string, number>();  // title -> first index
+  const unique: RawNotionBlock[] = [];
+  const duplicates: RawNotionBlock[] = [];
+  const deduped: string[] = [];
+
+  for (let i = 0; i < blocks.length; i++) {
+    const b = blocks[i];
+    if (b.type === "child_page") {
+      const title = (b.child_page as any)?.title ?? "";
+      if (seen.has(title)) {
+        duplicates.push(b);
+        if (!deduped.includes(title)) deduped.push(title);
+      } else {
+        seen.set(title, i);
+        unique.push(b);
+      }
+    } else {
+      unique.push(b);
+    }
+  }
+  return { unique, duplicates, deduped };
+}
+
+/**
+ * Merge multiple duplicate pages into one consolidated page.
+ * 1. Reads all blocks from source pages
+ * 2. Dedup child_page blocks by title
+ * 3. Creates a new page under parentPageId
+ * 4. Writes blocks in batches of 100
+ * 5. Trashes source pages
+ * 6. Returns the new page ID
+ */
+export async function mergePages(
+  notion: Client,
+  pageIds: string[],
+  targetTitle: string,
+  parentPageId: string,
+): Promise<{ newPageId: string; blocksWritten: number; deduped: string[] }> {
+  // 1. Read all blocks from all source pages
+  const allBlocks: RawNotionBlock[] = [];
+  for (const pid of pageIds) {
+    const blocks = await readAllBlocks(notion, pid);
+    allBlocks.push(...blocks);
+  }
+
+  // 2. Dedup child_page blocks
+  const { unique, duplicates, deduped } = dedupChildPages(allBlocks);
+
+  // 3. Convert to WikiBlocks (preserve block types)
+  const wikiBlocks: WikiBlock[] = [];
+  for (const b of unique) {
+    const bt = b.type as string;
+    const inner = (b as any)[bt];
+    if (!inner) continue;
+    switch (bt) {
+      case "paragraph":
+      case "heading_1":
+      case "heading_2":
+      case "heading_3":
+        wikiBlocks.push({ [bt]: { rich_text: inner.rich_text ?? [] } } as any);
+        break;
+      case "bulleted_list_item":
+      case "numbered_list_item":
+        wikiBlocks.push({ [bt]: { rich_text: inner.rich_text ?? [] } } as any);
+        break;
+      case "to_do":
+        wikiBlocks.push({ to_do: { rich_text: inner.rich_text ?? [], checked: inner.checked ?? false } } as any);
+        break;
+      case "callout":
+        wikiBlocks.push({ callout: { rich_text: inner.rich_text ?? [], icon: inner.icon } } as any);
+        break;
+      case "divider":
+        wikiBlocks.push({ divider: {} });
+        break;
+      case "quote":
+        wikiBlocks.push({ quote: { rich_text: inner.rich_text ?? [] } } as any);
+        break;
+      case "code":
+        wikiBlocks.push({ code: { rich_text: inner.rich_text ?? [], language: inner.language ?? "plain text" } } as any);
+        break;
+      case "child_page":
+        // child_page blocks reference other pages; we preserve them
+        wikiBlocks.push({ child_page: { title: inner.title ?? "Untitled" } } as any);
+        break;
+      default:
+        // Unsupported block type — skip silently
+        break;
+    }
+  }
+
+  // 4. Create new page
+  const newPage = await notion.pages.create({
+    parent: { type: "page_id", page_id: parentPageId },
+    properties: {
+      title: { title: [{ type: "text", text: { content: targetTitle } }] },
+    },
+  });
+
+  const newPageId = newPage.id;
+
+  // 5. Write blocks in batches of 100
+  for (let i = 0; i < wikiBlocks.length; i += 100) {
+    const batch = wikiBlocks.slice(i, i + 100);
+    await notion.blocks.children.append({ block_id: newPageId, children: batch as any });
+  }
+
+  // 6. Trash source pages
+  for (const pid of pageIds) {
+    try {
+      await notion.pages.update({ page_id: pid, archived: true });
+    } catch {
+      // Some pages may already be trashed
+    }
+  }
+
+  return { newPageId, blocksWritten: wikiBlocks.length, deduped };
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+// Wholedoc: Text-to-Blocks (for file upload)
+// ═════════════════════════════════════════════════════════════════════════
+
+/**
+ * Parse plain text content into paragraph blocks.
+ * Handles 2000-char rich text limit per segment.
+ * Detects lines that look like headings (## ... or 1. Introduction) and
+ * converts them to heading blocks.
+ */
+export function parseDocumentToBlocks(text: string): WikiBlock[] {
+  const lines = text.split("\n");
+  const blocks: WikiBlock[] = [];
+  let paraLines: string[] = [];
+
+  function flushPara() {
+    if (paraLines.length === 0) return;
+    const joined = paraLines.join(" ").trim();
+    if (joined) {
+      // Handle long paragraphs by splitting at 2000-char boundaries
+      let remaining = joined;
+      while (remaining) {
+        const chunk = remaining.slice(0, 2000);
+        remaining = remaining.slice(2000);
+        blocks.push({ paragraph: { rich_text: [{ type: "text", text: { content: chunk } }] } });
+      }
+    }
+    paraLines = [];
+  }
+
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line) { flushPara(); continue; }
+
+    // Detect headings: "## ..." or "# ..." or "1. Introduction" pattern
+    const h2Match = line.match(/^##\s+(.+)/);
+    const h3Match = line.match(/^###\s+(.+)/);
+    const h1Match = line.match(/^#\s+(.+)/);
+    const numberedHeading = line.match(/^(\d+)\.\s+(.+)/);
+
+    if (h1Match) {
+      flushPara();
+      blocks.push({ heading_1: { rich_text: [{ type: "text", text: { content: h1Match[1] } }] } });
+    } else if (h2Match) {
+      flushPara();
+      blocks.push({ heading_2: { rich_text: [{ type: "text", text: { content: h2Match[1] } }] } });
+    } else if (h3Match) {
+      flushPara();
+      blocks.push({ heading_3: { rich_text: [{ type: "text", text: { content: h3Match[1] } }] } });
+    } else if (/^---/.test(line)) {
+      flushPara();
+      blocks.push({ divider: {} });
+    } else if (/^-\s/.test(line)) {
+      flushPara();
+      const text = line.replace(/^-\s+/, "");
+      blocks.push({ bulleted_list_item: { rich_text: [{ type: "text", text: { content: text } }] } });
+    } else if (/^>\s/.test(line)) {
+      flushPara();
+      const text = line.replace(/^>\s+/, "");
+      blocks.push({ quote: { rich_text: [{ type: "text", text: { content: text } }] } });
+    } else {
+      paraLines.push(line);
+    }
+  }
+  flushPara();
+  return blocks;
 }
 
 // ═════════════════════════════════════════════════════════════════════════

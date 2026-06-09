@@ -10,7 +10,12 @@ Shared types, client factory, Notion API operations, block builders, block↔mar
 | `queryAll(notion, dbId, filter?)` | Paginated DB query |
 | `getPropVal(page, field)` | Extract typed property value |
 | `getBlocks(notion, pageId, limit?)` | Fetch page blocks |
-| `addBlocks(notion, pageId, blocks)` | Append blocks |
+| `readAllBlocks(notion, pageId, max?)` | Paginated: read ALL blocks from a page |
+| `findPagesBySourceRef(notion, dbId, sourceRef)` | Find duplicates by SourceRef property |
+| `dedupChildPages(blocks)` | Dedup child_page blocks by title, keep first |
+| `mergePages(notion, pageIds, title, parentId)` | Full merge: read → dedup → create → trash |
+| `parseDocumentToBlocks(text)` | Plain text to Notion blocks (handles 2000-char limit) |
+| `addBlocks(notion, pageId, blocks)` | Append blocks (auto-batches 100) |
 | `makeRich(text)` | Split text into 2000-char rich-text segments |
 | `makeBullet(text)` | Create bullet block |
 | `makeHeading(text, level?)` | Create heading block |
@@ -67,5 +72,6 @@ Shared types, client factory, Notion API operations, block builders, block↔mar
 
 | Script | Purpose |
 |--------|---------|
-| `scripts/ingest-engine.ts` | Orient → Archive → Consolidate → Log |
+| `scripts/ingest-engine.ts` | Orient → Archive → Consolidate → Log (supports entries + wholedoc) |
 | `scripts/vault-lint.ts` | Property completeness + staleness checks |
+| `scripts/merge/merge-pages.ts` | Ad-hoc duplicate page merge by SourceRef |
